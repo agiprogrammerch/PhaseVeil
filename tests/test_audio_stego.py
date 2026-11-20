@@ -21,7 +21,7 @@ PASS = "lab authorised passphrase 42"
 def _hide(cover, rate, payload, passphrase, cfg, compress=True):
     blob = make_blob(payload, passphrase, compress=compress, cfg=cfg.crypto)
     stego, metrics = audio_stego.hide_payload(
-        cover, rate, blob.blob, cfg=cfg.audio, rs_cfg=cfg.rs, flags=blob.flags
+        cover, rate, blob.blob, audio_cfg=cfg.audio, rs_cfg=cfg.rs, flags=blob.flags
     )
     return stego, metrics, blob
 
@@ -35,7 +35,7 @@ def test_plaintext_round_trip(cfg, cover) -> None:
     rate, samples, _path = cover
     stego, metrics, blob = _hide(samples, rate, TEXT, None, cfg)
     payload, flags, codewords = audio_stego.extract_payload(
-        stego, rate, cfg=cfg.audio, rs_cfg=cfg.rs
+        stego, rate, audio_cfg=cfg.audio, rs_cfg=cfg.rs
     )
     assert parse_blob(payload, None, expect_flags=flags) == TEXT
     assert codewords >= 1
@@ -45,7 +45,7 @@ def test_encrypted_round_trip(cfg, cover) -> None:
     rate, samples, _path = cover
     stego, _m, _b = _hide(samples, rate, TEXT, PASS, cfg)
     payload, flags, _cw = audio_stego.extract_payload(
-        stego, rate, cfg=cfg.audio, rs_cfg=cfg.rs
+        stego, rate, audio_cfg=cfg.audio, rs_cfg=cfg.rs
     )
     assert parse_blob(payload, PASS, expect_flags=flags) == TEXT
 
@@ -55,7 +55,7 @@ def test_encrypted_binary_payload_round_trip(cfg, cover) -> None:
     data = bytes(range(256)) * 2
     stego, _m, _b = _hide(samples, rate, data, PASS, cfg)
     payload, flags, _cw = audio_stego.extract_payload(
-        stego, rate, cfg=cfg.audio, rs_cfg=cfg.rs
+        stego, rate, audio_cfg=cfg.audio, rs_cfg=cfg.rs
     )
     assert parse_blob(payload, PASS, expect_flags=flags) == data
 
@@ -64,7 +64,7 @@ def test_wrong_passphrase_rejected(cfg, cover) -> None:
     rate, samples, _path = cover
     stego, _m, _b = _hide(samples, rate, TEXT, PASS, cfg)
     payload, flags, _cw = audio_stego.extract_payload(
-        stego, rate, cfg=cfg.audio, rs_cfg=cfg.rs
+        stego, rate, audio_cfg=cfg.audio, rs_cfg=cfg.rs
     )
     with pytest.raises(PassphraseError):
         parse_blob(payload, "not-the-passphrase", expect_flags=flags)
@@ -74,7 +74,7 @@ def test_no_passphrase_on_encrypted_payload_rejected(cfg, cover) -> None:
     rate, samples, _path = cover
     stego, _m, _b = _hide(samples, rate, TEXT, PASS, cfg)
     payload, flags, _cw = audio_stego.extract_payload(
-        stego, rate, cfg=cfg.audio, rs_cfg=cfg.rs
+        stego, rate, audio_cfg=cfg.audio, rs_cfg=cfg.rs
     )
     with pytest.raises(PassphraseError):
         parse_blob(payload, None, expect_flags=flags)
@@ -86,7 +86,7 @@ def test_various_payload_sizes_round_trip(cfg, cover) -> None:
         payload = bytes((i * 7 + 13) % 256 for i in range(size))
         stego, metrics, _b = _hide(samples, rate, payload, None, cfg)
         got, flags, _cw = audio_stego.extract_payload(
-            stego, rate, cfg=cfg.audio, rs_cfg=cfg.rs
+            stego, rate, audio_cfg=cfg.audio, rs_cfg=cfg.rs
         )
         assert parse_blob(got, None, expect_flags=flags) == payload, f"size {size}"
         assert metrics.payload_bits > 0
@@ -159,7 +159,7 @@ def test_extraction_survives_pcm_noise(cfg, cover) -> None:
     rng = np.random.default_rng(3)
     noisy = np.clip(stego.astype(np.int32) + rng.integers(-1, 2, size=stego.shape), -32768, 32767)
     payload, flags, _cw = audio_stego.extract_payload(
-        noisy.astype(np.int16), rate, cfg=cfg.audio, rs_cfg=cfg.rs
+        noisy.astype(np.int16), rate, audio_cfg=cfg.audio, rs_cfg=cfg.rs
     )
     assert parse_blob(payload, None, expect_flags=flags) == TEXT
 
@@ -170,7 +170,7 @@ def test_extraction_survives_small_amplitude_tilt(cfg, cover) -> None:
     stego, _m, _b = _hide(samples, rate, TEXT, None, cfg)
     tilted = np.clip(np.rint(stego.astype(np.float64) * 1.0005), -32768, 32767).astype(np.int16)
     payload, flags, _cw = audio_stego.extract_payload(
-        tilted, rate, cfg=cfg.audio, rs_cfg=cfg.rs
+        tilted, rate, audio_cfg=cfg.audio, rs_cfg=cfg.rs
     )
     assert parse_blob(payload, None, expect_flags=flags) == TEXT
 
@@ -178,7 +178,7 @@ def test_extraction_survives_small_amplitude_tilt(cfg, cover) -> None:
 def test_extraction_from_unmodified_cover_fails_cleanly(cfg, cover) -> None:
     rate, samples, _path = cover
     with pytest.raises(audio_stego.ExtractionError):
-        audio_stego.extract_payload(samples, rate, cfg=cfg.audio, rs_cfg=cfg.rs)
+        audio_stego.extract_payload(samples, rate, audio_cfg=cfg.audio, rs_cfg=cfg.rs)
 
 
 def test_extraction_from_white_noise_fails_cleanly(cfg) -> None:
@@ -187,7 +187,7 @@ def test_extraction_from_white_noise_fails_cleanly(cfg) -> None:
         np.rint(np.random.default_rng(0).normal(0, 3000, size=rate * 2)), -32768, 32767
     ).astype(np.int16)
     with pytest.raises(audio_stego.ExtractionError):
-        audio_stego.extract_payload(noise, rate, cfg=cfg.audio, rs_cfg=cfg.rs)
+        audio_stego.extract_payload(noise, rate, audio_cfg=cfg.audio, rs_cfg=cfg.rs)
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +199,7 @@ def test_capacity_error_for_tiny_cover(cfg, too_short) -> None:
     rate, samples = too_short
     blob = make_blob(b"payload", None, compress=True, cfg=cfg.crypto)
     with pytest.raises(audio_stego.CapacityError):
-        audio_stego.hide_payload(samples, rate, blob.blob, cfg=cfg.audio, rs_cfg=cfg.rs, flags=blob.flags)
+        audio_stego.hide_payload(samples, rate, blob.blob, audio_cfg=cfg.audio, rs_cfg=cfg.rs, flags=blob.flags)
 
 
 def test_determinism_plaintext(cfg, cover) -> None:
@@ -258,7 +258,7 @@ def test_short_cover_still_round_trips(cfg, short_cover) -> None:
     rate, samples = short_cover
     stego, m, _b = _hide(samples, rate, b"tiny", None, cfg)
     payload, flags, _cw = audio_stego.extract_payload(
-        stego, rate, cfg=cfg.audio, rs_cfg=cfg.rs
+        stego, rate, audio_cfg=cfg.audio, rs_cfg=cfg.rs
     )
     assert parse_blob(payload, None, expect_flags=flags) == b"tiny"
     assert m.snr_db > 25.0
@@ -269,10 +269,10 @@ def test_hide_file_extract_file_round_trip(cfg, cover, tmp_path) -> None:
     blob = make_blob(TEXT, PASS, compress=True, cfg=cfg.crypto)
     out = tmp_path / "stego.wav"
     metrics = audio_stego.hide_file(
-        path, out, blob.blob, cfg=cfg.audio, rs_cfg=cfg.rs, flags=blob.flags
+        path, out, blob.blob, audio_cfg=cfg.audio, rs_cfg=cfg.rs, flags=blob.flags
     )
     assert out.exists()
-    got = audio_stego.extract_file(out, passphrase=PASS, cfg=cfg.audio, rs_cfg=cfg.rs)
+    got = audio_stego.extract_file(out, passphrase=PASS, audio_cfg=cfg.audio, rs_cfg=cfg.rs)
     assert got == TEXT
     assert metrics.snr_db > 25.0
 

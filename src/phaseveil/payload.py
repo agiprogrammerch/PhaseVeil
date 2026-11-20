@@ -124,14 +124,21 @@ def parse_packet(data: bytes, *, allow_zero_padding: bool = True) -> Packet:
 # ---------------------------------------------------------------------------
 
 
-#: Parity symbols used for the *single-codeword* small-payload mode.
-#: A frame of at most ``255 - SMALL_NSYM`` bytes fits in one short codeword,
-#: which avoids padding (and transmitting) a whole 255-byte block.
-SMALL_NSYM: int = 32
-
-
 def _rsc(nsym: int, nsize: int) -> "_rs.RSCodec":
     return _rs.RSCodec(nsym, nsize)
+
+
+def parity_for_frame(frame_len: int, rs_cfg: ReedSolomonConfig) -> int:
+    """Deterministic parity-symbol count for a frame of ``frame_len`` bytes.
+
+    The parity is the constant configuration value; the decoder derives the
+    *codeword layout* (one short codeword vs. ``ceil(frame/k)`` full codewords)
+    from the frame length it reads out of the intact systematic header, so no
+    out-of-band parity field is ever needed.
+    """
+    if frame_len <= 0:
+        raise ValueError("frame length must be positive")
+    return int(rs_cfg.parity_symbols)
 
 
 def rs_encode_stream(data: bytes, rs_cfg: ReedSolomonConfig) -> bytes:
@@ -139,18 +146,20 @@ def rs_encode_stream(data: bytes, rs_cfg: ReedSolomonConfig) -> bytes:
 
     Two systematic modes, chosen by size so the decoder can always recover:
 
-    * **small payload** - one codeword of exactly ``len(data) + SMALL_NSYM``
-      bytes.  A 60-byte frame becomes 108 bytes instead of a full 255-byte
+    * **small payload** - one codeword of exactly
+      ``len(data) + parity`` bytes (fits when ``len(data) <= 255 - parity``).
+      A 60-byte frame becomes a ~124-byte codeword instead of a 255-byte
       block, which is what keeps short timing transmissions fast.
     * **large payload** - the frame is zero-padded and split into
       ``k = 255 - parity`` blocks, each encoded into a 255-byte codeword
-      (required once the frame exceeds ``255 - SMALL_NSYM`` bytes, because a
+      (required once the frame exceeds ``255 - parity`` bytes, because a
       GF(2^8) codeword is at most 255 bytes long).
     """
     if len(data) == 0:
         raise ValueError("nothing to encode")
-    if len(data) + SMALL_NSYM <= rs_cfg.codeword_length:
-        return bytes(_rsc(SMALL_NSYM, len(data) + SMALL_NSYM).encode(bytearray(data)))
+    parity = rs_cfg.parity_symbols
+    if len(data) + parity <= rs_cfg.codeword_length:
+        return bytes(_rsc(parity, len(data) + parity).encode(bytearray(data)))
     padded = bytes(data)
     pad = (-len(padded)) % rs_cfg.data_symbols
     padded += b"\x00" * pad
@@ -219,11 +228,6 @@ def _erasures(
     ]
 
 
-def _small_mode_stream_length(frame_len: int) -> int:
-    """Codeword length used by the single-codeword mode for ``frame_len``."""
-    return frame_len + SMALL_NSYM
-
-
 def embed_payload(
     payload: bytes, flags: int, rs_cfg: ReedSolomonConfig, *, version: int = WIRE_VERSION
 ) -> bytes:
@@ -250,7 +254,7 @@ def parse_embedded(
     Returns the number of *codewords* consumed (1 for the small-payload mode).
     """
     total = len(stream)
-    if total < SMALL_NSYM + MIN_FRAME_BYTES:
+    if total < rs_cfg.parity_symbols + MIN_FRAME_BYTES:
         raise FramingError(
             f"channel stream too short: {total} bytes cannot hold one RS codeword"
         )
@@ -262,11 +266,12 @@ def parse_embedded(
         except Exception:
             frame_len = -1
         if MIN_FRAME_BYTES <= frame_len <= total:
-            if frame_len + SMALL_NSYM <= total:
-                cand = stream[:_small_mode_stream_length(frame_len)]
+            parity = parity_for_frame(frame_len, rs_cfg)
+            if frame_len + parity <= total:
+                cand = stream[: frame_len + parity]
                 mask = _erasures(erasure_mask, 0, len(cand))
                 try:
-                    decoded, _rep = _decode_codeword(cand, SMALL_NSYM, mask)
+                    decoded, _rep = _decode_codeword(cand, parity, mask)
                     packet = parse_packet(decoded)
                     if HEADER_BYTES + len(packet.payload) + CRC_BYTES == frame_len:
                         return packet.payload, packet.flags, 1
@@ -287,10 +292,13 @@ def parse_embedded(
 
     # ---- fallback 1: single-codeword length scan -----------------------
     limit = min(total, rs_cfg.codeword_length)
-    for length in range(SMALL_NSYM + MIN_FRAME_BYTES, limit + 1):
+    for length in range(rs_cfg.parity_symbols + MIN_FRAME_BYTES, limit + 1):
+        parity = min(rs_cfg.parity_symbols, rs_cfg.codeword_length - length)
+        if parity < 8:
+            continue
         mask = _erasures(erasure_mask, 0, length)
         try:
-            decoded, _rep = _decode_codeword(stream[:length], SMALL_NSYM, mask)
+            decoded, _rep = _decode_codeword(stream[:length], parity, mask)
             packet = parse_packet(decoded)
         except FramingError:
             continue

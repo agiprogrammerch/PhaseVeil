@@ -108,7 +108,7 @@ def test_covert_audio_is_suspicious(cfg) -> None:
     rate, cover = synth_cover(seconds=2.0, seed=12)
     blob = make_blob(COVERT_TEXT, None, compress=True, cfg=cfg.crypto)
     stego, _m = audio_stego.hide_payload(
-        cover, rate, blob.blob, cfg=cfg.audio, rs_cfg=cfg.rs, flags=blob.flags
+        cover, rate, blob.blob, audio_cfg=cfg.audio, rs_cfg=cfg.rs, flags=blob.flags
     )
     metrics = phase_statistics(stego, rate, cfg.audio)
     score, _subs = _audio_feature_scores(metrics, cfg.detector, None)
@@ -120,7 +120,7 @@ def test_encrypted_covert_detected_same_as_plaintext(cfg) -> None:
     rate, cover = synth_cover(seconds=2.0, seed=13)
     blob = make_blob(COVERT_TEXT, "a passphrase", compress=True, cfg=cfg.crypto)
     stego, _m = audio_stego.hide_payload(
-        cover, rate, blob.blob, cfg=cfg.audio, rs_cfg=cfg.rs, flags=blob.flags
+        cover, rate, blob.blob, audio_cfg=cfg.audio, rs_cfg=cfg.rs, flags=blob.flags
     )
     metrics = phase_statistics(stego, rate, cfg.audio)
     score, _subs = _audio_feature_scores(metrics, cfg.detector, None)
@@ -133,7 +133,7 @@ def test_detector_across_durations(cfg, seconds) -> None:
     rate, cover = synth_cover(seconds=seconds, seed=int(seconds * 10))
     blob = make_blob(COVERT_TEXT, None, compress=True, cfg=cfg.crypto)
     stego, _m = audio_stego.hide_payload(
-        cover, rate, blob.blob, cfg=cfg.audio, rs_cfg=cfg.rs, flags=blob.flags
+        cover, rate, blob.blob, audio_cfg=cfg.audio, rs_cfg=cfg.rs, flags=blob.flags
     )
     s_clean, _ = _audio_feature_scores(
         phase_statistics(cover, rate, cfg.audio), cfg.detector, None
@@ -174,7 +174,7 @@ def test_baseline_mode_detects_covert(cfg, tmp_path) -> None:
     rate, cover = synth_cover(seconds=2.0, seed=23)
     blob = make_blob(COVERT_TEXT, None, compress=True, cfg=cfg.crypto)
     stego, _m = audio_stego.hide_payload(
-        cover, rate, blob.blob, cfg=cfg.audio, rs_cfg=cfg.rs, flags=blob.flags
+        cover, rate, blob.blob, audio_cfg=cfg.audio, rs_cfg=cfg.rs, flags=blob.flags
     )
     a = tmp_path / "stego.wav"
     b = tmp_path / "cover.wav"
@@ -183,6 +183,39 @@ def test_baseline_mode_detects_covert(cfg, tmp_path) -> None:
     report = analyze_audio_file(a, baseline_path=str(b), cfg=cfg.audio, det=cfg.detector)
     assert report.verdict == VERDICT_SUSPICIOUS
     assert report.anomaly_score >= cfg.detector.audio_score_threshold
+
+
+def test_degenerate_in_phase_harmonic_cover_is_flagged(cfg) -> None:
+    """Documented limitation, asserted as a test.
+
+    A synthetic cover whose harmonics all start at phase ``0.4*h`` *is*
+    mathematically phase-quantised: within a segment the bin phases land on a
+    lattice, exactly what phase coding imposes.  No deterministic phase
+    statistic can separate the two (the detector would also flag a flat
+    histogram with a chi-square test).  This is why ``--baseline`` differential
+    analysis exists and why natural covers are used elsewhere in the suite.
+    The same harmonics with random per-harmonic phases score as clean.
+    """
+    rate = 44100
+    x = sum(
+        (7000.0 / h**1.2) * np.sin(2 * np.pi * 180 * h * np.arange(2 * rate) / rate + 0.4 * h)
+        for h in range(1, 20)
+    )
+    in_phase = np.clip(np.rint(x / np.abs(x).max() * 0.75 * 32767), -32768, 32767).astype(np.int16)
+    rng = np.random.default_rng(3)
+    y = sum(
+        (7000.0 / h**1.2) * np.sin(2 * np.pi * 180 * h * np.arange(2 * rate) / rate + rng.uniform(0, 6))
+        for h in range(1, 20)
+    )
+    random_phase = np.clip(np.rint(y / np.abs(y).max() * 0.75 * 32767), -32768, 32767).astype(np.int16)
+    degenerate = phase_statistics(in_phase, rate, cfg.audio)
+    natural = phase_statistics(random_phase, rate, cfg.audio)
+    assert degenerate["cluster_zmax"] > natural["cluster_zmax"]
+    assert degenerate["phase_hist_entropy"] < natural["phase_hist_entropy"]
+    score, _ = _audio_feature_scores(degenerate, cfg.detector, None)
+    assert score >= cfg.detector.audio_score_threshold  # flagged: unavoidable
+    nscore, _ = _audio_feature_scores(natural, cfg.detector, None)
+    assert nscore < cfg.detector.audio_score_threshold  # clean control
 
 
 def test_analyze_audio_file_round_trip(cfg, cover) -> None:

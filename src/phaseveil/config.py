@@ -17,6 +17,7 @@ Modules
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, replace
 from typing import Tuple
 
@@ -76,9 +77,21 @@ class AudioConfig:
     #: embedding error energy (SNR rises by ~10 dB when they are skipped).
     bin_mag_cap_factor: float = 1.0
     #: Bins within this *relative* dead-band of a selection boundary are
-    #: dropped on both sides so embed/extract always agree on the bin set even
+    #: dropped on both sides so embed/extract usually agree on the bin set even
     #: when 16-bit PCM quantization perturbs magnitudes by ~1e-5.
     bin_deadband: float = 0.03
+    #: Deterministic ladder of boundary multipliers.  The embedder picks the
+    #: first entry whose boundaries sit at least ``bin_stability_margin`` away
+    #: from every per-bin median (so no bin can change membership when 16-bit
+    #: rounding perturbs that median), and the extractor tries the same ladder
+    #: until the Reed-Solomon/CRC check validates the packet.  This removes the
+    #: last cover-dependent failure mode: a bin sitting arbitrarily close to a
+    #: selection boundary.
+    bin_boundary_ladder: Tuple[float, ...] = (1.00, 0.99, 1.01, 0.98, 1.02, 0.96, 1.04)
+    #: Minimum relative distance a per-bin median must keep from a selection
+    #: boundary for the choice to be considered stable (>> the ~0.03 %
+    #: perturbation int16 rounding causes).
+    bin_stability_margin: float = 0.002
 
     #: Per-segment reliability floor: a bin is declared unreliable when its
     #: instantaneous magnitude in the *carrier* segment is below
@@ -108,12 +121,10 @@ class AudioConfig:
     @property
     def bits_per_bin(self) -> int:
         """Payload bits carried by every selected FFT bin."""
-        return int(round(__import__("math").log2(self.phase_levels)))
+        return int(round(math.log2(self.phase_levels)))
 
     def band_bins(self, sample_rate: int) -> Tuple[int, int]:
         """Return the inclusive ``(k_low, k_high)`` rFFT bin indices of the band."""
-        import math
-
         bin_hz = sample_rate / self.segment_length
         k_low = max(1, math.ceil(self.band_low_hz / bin_hz - 1e-9))
         # A bin is fully inside the band when its centre frequency is.
@@ -194,8 +205,12 @@ class ReedSolomonConfig:
     by the audio channel) per block.
     """
 
-    #: Parity symbols per 255-byte codeword (standard RS(255, 207)).
-    parity_symbols: int = 48
+    #: Parity symbols per codeword.  64 repairs up to 32 byte errors *or* 64
+    #: erasures per codeword, which covers even a cover whose chunks contain a
+    #: fully silent carrier segment (such a segment marks ~40 bytes of
+    #: erasures in the audio channel).  Default balance between channel
+    #: throughput (255/(255-64) = 1.34x) and recovery power.
+    parity_symbols: int = 64
     #: Total codeword length (GF(2^8) has 255 non-zero symbols).
     codeword_length: int = 255
 

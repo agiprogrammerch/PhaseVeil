@@ -9,12 +9,12 @@ from phaseveil.payload import (
     CRC_BYTES,
     HEADER_BYTES,
     MIN_FRAME_BYTES,
-    SMALL_NSYM,
     FramingError,
     embed_payload,
     frame_packet,
     parse_embedded,
     parse_packet,
+    parity_for_frame,
     rs_decode_blocks,
     rs_encode_stream,
     _decode_codeword,
@@ -81,13 +81,36 @@ def test_non_zero_trailing_bytes_rejected() -> None:
 # --------------------------------------------------------------------------
 
 
+def frame_parity(frame_len: int) -> int:
+    """Parity symbols the codec uses for a frame of this length."""
+    return parity_for_frame(frame_len, RS)
+
+
+def test_parity_is_a_deterministic_function_of_frame_length() -> None:
+    """The decoder must be able to recompute the parity from the header alone."""
+    for frame_len in (20, 78, 160, 191, 200, 400, 900):
+        assert frame_parity(frame_len) == RS.parity_symbols
+        assert parity_for_frame(frame_len, RS) == parity_for_frame(frame_len, RS)
+
+
+def test_layout_is_derivable_from_frame_length() -> None:
+    """<= 191-byte frames ride in one short codeword; larger frames in blocks."""
+    small = frame_packet(b"small", 0)
+    assert frame_parity(len(small)) == RS.parity_symbols
+    assert len(rs_encode_stream(small, RS)) == len(small) + RS.parity_symbols
+    big = frame_packet(b"B" * (RS.codeword_length - RS.parity_symbols + 5), 0)
+    stream = rs_encode_stream(big, RS)
+    assert len(stream) % RS.codeword_length == 0
+    assert len(stream) >= RS.codeword_length
+
+
 def test_rs_small_mode_is_one_short_codeword() -> None:
-    """A frame that fits (255 - SMALL_NSYM) bytes uses a single short codeword."""
+    """A frame that fits (255 - parity) bytes uses a single short codeword."""
     frame = frame_packet(b"small payload", 0)
     stream = rs_encode_stream(frame, RS)
-    assert len(stream) == len(frame) + SMALL_NSYM
+    assert len(stream) == len(frame) + frame_parity(len(frame))
     assert len(stream) < 255
-    decoded, _ = _decode_codeword(stream, SMALL_NSYM, None)
+    decoded, _ = _decode_codeword(stream, frame_parity(len(frame)), None)
     assert decoded == frame
 
 
@@ -103,10 +126,10 @@ def test_rs_small_mode_corrects_errors_up_to_capacity() -> None:
     frame = frame_packet(b"PhaseVeil RS payload " * 3, 0)
     stream = bytearray(rs_encode_stream(frame, RS))
     assert len(stream) < 255  # single-codeword mode
-    for i in range(SMALL_NSYM // 2):
+    for i in range(RS.max_errors):
         stream[i * 7 % len(stream)] ^= 0x5A
-    decoded, repaired = _decode_codeword(bytes(stream), SMALL_NSYM, None)
-    assert repaired >= SMALL_NSYM // 2
+    decoded, repaired = _decode_codeword(bytes(stream), frame_parity(len(frame)), None)
+    assert repaired >= RS.max_errors
     assert parse_packet(decoded).payload == b"PhaseVeil RS payload " * 3
 
 
@@ -123,26 +146,30 @@ def test_rs_large_mode_corrects_errors_up_to_capacity() -> None:
 
 
 def test_rs_corrects_erasures() -> None:
+    """Erasures are the silent-carrier case: up to ``parity`` per codeword."""
     frame = frame_packet(b"erasures are cheap", 0)
     stream = rs_encode_stream(frame, RS)
+    parity = frame_parity(len(frame))
     mask = [False] * len(stream)
-    for i in range(0, SMALL_NSYM, 2):
+    for i in range(0, parity, 2):
         mask[i] = True
-    decoded, _ = _decode_codeword(stream, SMALL_NSYM, [i for i, m in enumerate(mask) if m])
+    decoded, _ = _decode_codeword(stream, parity, [i for i, m in enumerate(mask) if m])
     assert parse_packet(decoded).payload == b"erasures are cheap"
 
 
 def test_rs_gives_up_beyond_capacity() -> None:
+    """More than ``parity/2`` byte errors in one codeword is unrecoverable."""
     frame = frame_packet(b"beyond repair", 0)
     stream = bytearray(rs_encode_stream(frame, RS))
-    for i in range(0, len(stream), 3):
+    assert len(stream) < RS.codeword_length  # single-codeword mode
+    for i in range(0, len(stream), 2):  # ~half the codeword corrupted
         stream[i] ^= 0xFF
     with pytest.raises(FramingError):
-        _decode_codeword(bytes(stream), SMALL_NSYM, None)
+        _decode_codeword(bytes(stream), frame_parity(len(frame)), None)
 
 
 def test_large_mode_zero_padding_tolerated() -> None:
-    frame = frame_packet(b"p" * 250, 0)  # > 255 - SMALL_NSYM -> multi-block
+    frame = frame_packet(b"p" * 250, 0)  # > 255 - parity -> multi-block
     stream = rs_encode_stream(frame, RS)
     assert len(stream) % 255 == 0
     decoded, _ = rs_decode_blocks(stream, RS)
@@ -154,7 +181,9 @@ def test_large_mode_zero_padding_tolerated() -> None:
 
 def test_non_zero_trailing_bytes_rejected() -> None:
     frame = frame_packet(b"payload", 0)
-    decoded, _ = _decode_codeword(rs_encode_stream(frame, RS), SMALL_NSYM, None)
+    decoded, _ = _decode_codeword(
+        rs_encode_stream(frame, RS), frame_parity(len(frame)), None
+    )
     tampered = bytearray(decoded)
     tampered[-1] = 0x77
     with pytest.raises(FramingError):
@@ -171,12 +200,12 @@ def test_parse_embedded_finds_codeword_count() -> None:
 
 def test_parse_embedded_multi_codeword() -> None:
     # force the large mode: payload larger than 255 - SMALL_NSYM
-    frame = frame_packet(b"A" * (255 - SMALL_NSYM + 5), 0)
+    frame = frame_packet(b"A" * (255 - RS.parity_symbols + 5), 0)
     stream = rs_encode_stream(frame, RS)
     assert len(stream) % 255 == 0
     payload, flags, count = parse_embedded(stream, None, RS)
     assert count == 2
-    assert payload == b"A" * (255 - SMALL_NSYM + 5)
+    assert payload == b"A" * (255 - RS.parity_symbols + 5)
 
 
 def test_parse_embedded_survives_corrupt_header() -> None:

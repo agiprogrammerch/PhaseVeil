@@ -88,7 +88,7 @@ def cmd_audio_hide(args: argparse.Namespace) -> int:
         cfg=cfg.crypto,
     )
     metrics = audio_stego.hide_file(
-        args.input, args.output, blob.blob, cfg=cfg.audio, rs_cfg=cfg.rs, flags=blob.flags
+        args.input, args.output, blob.blob, audio_cfg=cfg.audio, rs_cfg=cfg.rs, flags=blob.flags
     )
     _print(
         _table(
@@ -116,9 +116,9 @@ def cmd_audio_hide(args: argparse.Namespace) -> int:
 def cmd_audio_extract(args: argparse.Namespace) -> int:
     from . import audio_stego
 
+    cfg = _config_from_args(args)
     payload, flags, codewords = audio_stego.extract_payload(
-        *_read_stego(args), cfg=_config_from_args(args).audio,
-        rs_cfg=_config_from_args(args).rs,
+        *_read_stego(args), audio_cfg=cfg.audio, rs_cfg=cfg.rs,
     )
     text = parse_blob(payload, getattr(args, "passphrase", None), expect_flags=flags)
     out = args.out

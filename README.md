@@ -239,9 +239,10 @@ verdict = SUSPICIOUS iff score ≥ 0.5
 | Audio | constellation `M` | 8 (3 bits/bin) | 3x payload per unit injected energy vs 2-PSK |
 | Audio | chunk `K` | 4 segments | data carrier + 3 delta-preserving followers |
 | Audio | bin window | `[0.3, 1.0] ×` band median, 3 % dead-band | energy-aware selection, stable bin sets |
+| Audio | boundary ladder | 7 multipliers, 0.2 % stability margin | a bin sitting within 0.03 % of a selection boundary (int16 rounding scale) would otherwise shift the whole bit layout; the embedder picks a *stable* boundary and the extractor tries the same ladder |
 | Audio | reliability floor | `max(1 %, 20 × σ_q)` | erasures only where the phase is truly lost |
-| FEC | Reed–Solomon | RS(255, 207), nsym 48 | 24 byte errors or 48 erasures per codeword |
-| FEC | small-payload mode | 1 codeword of `frame+32` | 4× shorter streams for short payloads |
+| FEC | Reed–Solomon | RS(255, 191), nsym 64 | 32 byte errors or 64 erasures per codeword |
+| FEC | small-payload mode | 1 codeword of `frame + parity` | ~2x shorter streams for short payloads |
 | Crypto | AES-256-GCM | 200 000 PBKDF2 iterations, 16 B salt, 12 B nonce | authenticated, nonce-reuse-free |
 | Timing | `bit0_ms` / `bit1_ms` | 20 / 60 ms | 40 ms gap vs ±8 ms jitter = 5× margin |
 | Timing | preamble | 16 alternating bits | sync without assuming absolute clocks |
@@ -250,20 +251,29 @@ verdict = SUSPICIOUS iff score ≥ 0.5
 
 ---
 
-## Measured results (`phaseveil benchmark`)
+## Measured results
+
+`phaseveil benchmark` (deterministic, synthetic 3 s multi-harmonic covers):
 
 ```
 [1/3] Audio phase-coding round-trip fidelity
-  plaintext      SNR 34.94 dB   PSNR 45.90 dB   embedded 111 B  capacity 552 B
-  AES-256-GCM    SNR 33.24 dB   PSNR 44.20 dB   embedded 159 B  capacity 552 B
+  plaintext      SNR 33.69 dB   PSNR 44.65 dB   embedded 143 B   capacity 552 B
+  AES-256-GCM    SNR 32.58 dB   PSNR 43.53 dB   embedded 191 B   capacity 552 B
   capacity:  1 s → 172 B   2 s → 356 B   3 s → 588 B   5 s → 926 B   (44.1 kHz)
 [2/3] Timing codec: 12/12 jitter trials (±3–8 ms) recover, ±8 ms worst case PASS
 [3/3] Detector: audio TP 6/6, FP 0/6 · timing TP 6/6, Poisson FP 0/6, Gaussian FP 0/6
   clean audio score 0.000 vs covert 0.700 · clean Poisson 0.10 vs covert 0.55
-peak RSS: 111.6 MB  (budget 150 MB)
+peak RSS: 111.2 MB  (budget 150 MB)
 ```
 
-`pytest`: **133 passed** in ~70 s (includes live loopback UDP/TCP exchanges).
+Robustness sweep (`27/27` lossless round-trips over 9 cover classes x 3 seeds:
+harmonic stacks, square-wave AM "buzz", near-silent ambient, inharmonic bell
+partials, pure tone + noise, speech-like content with real pauses, multi-note
+synthetic music, noise bursts with a quiet middle, amplitude tremolo): SNR
+9.4–37.6 dB depending on how much usable mid-band energy the cover has, 0
+erasure-induced failures, and every covert sample detected.
+
+`pytest`: **136 passed** in ~95 s (includes live loopback UDP/TCP exchanges).
 
 ---
 
@@ -381,12 +391,19 @@ tests/               133 tests, synthetic fixtures only, no binary media
 * The audio detector is *targeted*: it knows the candidate scheme's geometry
   (segment length, band, chunk structure). Untargeted "any-steganography"
   detection is a harder problem and out of scope.
-* A cover whose mid-band phases are *already* quantised onto the same grid (e.g.
-  a fully in-phase, bin-aligned synthetic signal) is a degenerate case: use
-  `--baseline` for differential analysis on unusual covers.
+* A cover whose mid-band phases are *already* quantised onto the same grid -
+  e.g. a synthetic signal whose harmonics all start at the same phase, which
+  literally *is* phase coding - is a degenerate case that no deterministic
+  phase statistic can separate (see the asserting test in
+  `tests/test_detector.py::test_degenerate_in_phase_harmonic_cover_is_flagged`).
+  Use `--baseline` for differential analysis on unusual covers.
+* SNR tracks how much usable mid-band energy the cover has: a spectrally rich
+  cover reaches 30+ dB while a nearly silent one can fall below 20 dB.  The
+  capacity/bits-per-selection adapt automatically, and the erasure + FEC layer
+  guarantees lossless round-trips in every tested case.
 * The timing channel assumes a stable clock between sender and receiver (always
   true on loopback; cross-machine links would need periodic re-synchronisation).
-* Payload size is bounded by the RS(255, ·) block structure (≈200 KB per
+* Payload size is bounded by the RS(255, ·) block structure (≈191 KB per
   codeword chain); huge payloads simply need proportionally longer covers.
 
 ## License

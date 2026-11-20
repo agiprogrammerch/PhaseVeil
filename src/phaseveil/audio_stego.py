@@ -258,23 +258,71 @@ def band_magnitudes(
 
 
 def select_bins(
-    band_mag: np.ndarray, k_low: int, k_high: int, cfg: AudioConfig
+    band_mag: np.ndarray,
+    k_low: int,
+    k_high: int,
+    cfg: AudioConfig,
+    attempt: int = 0,
 ) -> Tuple[np.ndarray, float]:
     """Choose the embedding bins from per-file per-bin median magnitudes.
 
-    Returns ``(used_bin_indices, band_median_magnitude)``.  Deterministic and
-    identical on cover and stego thanks to the selection dead-band.
+    Returns ``(used_bin_indices, band_median_magnitude)``.
+
+    Determinism requirement: the *same* bins must be selected when the
+    statistics are computed from the cover and from the stego file, because the
+    bin order defines the bit layout.  16-bit rounding perturbs per-bin medians
+    by ~0.03 %, so a bin whose median sits arbitrarily close to a selection
+    boundary could otherwise change membership and silently shift every
+    subsequent bit.  Two defences combine:
+
+    * the ``bin_deadband`` drops a band around each nominal boundary, and
+    * the embedder picks a ladder entry (``bin_boundary_ladder``) whose
+      boundaries are demonstrably far from every median, while the extractor
+      tries the same ladder until the FEC/CRC check validates the packet.
     """
     if band_mag.size == 0:
         return np.empty(0, dtype=np.int64), 0.0
     band_median = float(np.median(band_mag))
     per_bin_median = np.median(band_mag, axis=0)
-    lo = cfg.bin_mag_floor_factor * band_median
-    hi = cfg.bin_mag_cap_factor * band_median
+    mult = cfg.bin_boundary_ladder[attempt % len(cfg.bin_boundary_ladder)]
+    lo = cfg.bin_mag_floor_factor * mult * band_median
+    hi = cfg.bin_mag_cap_factor * mult * band_median
     dead = cfg.bin_deadband
     keep = (per_bin_median >= lo * (1.0 + dead)) & (per_bin_median <= hi * (1.0 - dead))
     used = np.nonzero(keep)[0].astype(np.int64) + k_low
     return used, band_median
+
+
+def selection_stability(
+    band_mag: np.ndarray,
+    k_low: int,
+    k_high: int,
+    cfg: AudioConfig,
+    attempt: int = 0,
+) -> Tuple[bool, float]:
+    """Is this ladder attempt's bin choice immune to magnitude perturbations?
+
+    Returns ``(stable, smallest_relative_boundary_distance)``.  The extractor
+    recomputes the same statistic from the stego file, whose per-bin medians
+    differ from the cover's by only the int16 rounding error; the choice is
+    stable when every median is at least ``bin_stability_margin`` away from a
+    boundary, which is an order of magnitude more than that error.
+    """
+    if band_mag.size == 0:
+        return False, 0.0
+    band_median = float(np.median(band_mag))
+    per_bin_median = np.median(band_mag, axis=0)
+    mult = cfg.bin_boundary_ladder[attempt % len(cfg.bin_boundary_ladder)]
+    lo = cfg.bin_mag_floor_factor * mult * band_median
+    hi = cfg.bin_mag_cap_factor * mult * band_median
+    dead = cfg.bin_deadband
+    lo_eff, hi_eff = lo * (1.0 + dead), hi * (1.0 - dead)
+    # relative distance of each median to the nearest effective boundary
+    d_lo = np.abs(per_bin_median - lo_eff) / max(lo_eff, 1.0)
+    d_hi = np.abs(per_bin_median - hi_eff) / max(hi_eff, 1.0)
+    nearest = np.minimum(d_lo, d_hi)
+    smallest = float(nearest.min()) if nearest.size else 0.0
+    return smallest >= cfg.bin_stability_margin, smallest
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +366,7 @@ def hide_payload(
     sample_rate: int,
     data: bytes,
     *,
-    cfg: AudioConfig = AudioConfig(),
+    audio_cfg: AudioConfig = AudioConfig(),
     rs_cfg: ReedSolomonConfig = ReedSolomonConfig(),
     flags: int = 0,
     version: int = WIRE_VERSION,
@@ -333,15 +381,30 @@ def hide_payload(
     bits = bytes_to_bits(stream)
     n_bits = len(bits)
 
+    cfg = audio_cfg
     n_seg = segment_count(len(cover), cfg)
     band_mag, (k_low, k_high) = band_magnitudes(cover, sample_rate, cfg)
-    used, _band_median = select_bins(band_mag, k_low, k_high, cfg)
-    n_bins = len(used)
-    if n_bins == 0:
+
+    # Pick a ladder entry whose bin choice cannot be perturbed by 16-bit
+    # rounding (see selection_stability); the extractor tries the same ladder.
+    used = np.empty(0, dtype=np.int64)
+    attempt = 0
+    for attempt in range(len(cfg.bin_boundary_ladder)):
+        candidate, _med = select_bins(band_mag, k_low, k_high, cfg, attempt)
+        if candidate.size == 0:
+            continue
+        stable, _margin = selection_stability(band_mag, k_low, k_high, cfg, attempt)
+        if stable:
+            used = candidate
+            break
+        if used.size == 0:
+            used = candidate  # remember the first non-empty fallback
+    if used.size == 0:
         raise CapacityError(
             "no usable bins in the embedding band for this cover; "
             "lower bin_mag_floor_factor or use a richer audio file"
         )
+    n_bins = len(used)
     bits_per_segment = n_bins * cfg.bits_per_bin
     n_chunks = n_seg // cfg.chunk_segments
     if n_chunks * bits_per_segment < n_bits:
@@ -423,7 +486,7 @@ def extract_payload(
     stego: np.ndarray,
     sample_rate: int,
     *,
-    cfg: AudioConfig = AudioConfig(),
+    audio_cfg: AudioConfig = AudioConfig(),
     rs_cfg: ReedSolomonConfig = ReedSolomonConfig(),
 ) -> Tuple[bytes, int, int]:
     """Recover ``(payload, flags, codewords_used)`` from a stego file.
@@ -431,55 +494,65 @@ def extract_payload(
     Extraction is key-agnostic: it returns the raw blob so the caller can
     decrypt it.  Unreliable bins are marked as Reed-Solomon erasures.
     """
+    cfg = audio_cfg
     n_seg = segment_count(len(stego), cfg)
     band_mag, (k_low, k_high) = band_magnitudes(stego, sample_rate, cfg)
-    used, _ = select_bins(band_mag, k_low, k_high, cfg)
-    n_bins = len(used)
-    if n_bins == 0:
-        raise ExtractionError("no usable bins found in stego file")
 
-    bits_per_segment = n_bins * cfg.bits_per_bin
-    n_chunks = n_seg // cfg.chunk_segments
-    if n_chunks == 0 or bits_per_segment == 0:
-        raise ExtractionError("stego file too short to hold any payload")
+    # The embedder may have used any ladder entry (it picks the first *stable*
+    # one), so try them all: the RS/CRC layer decides which one is right.
+    last_error: Optional[Exception] = None
+    for attempt in range(len(cfg.bin_boundary_ladder)):
+        used, _band_median = select_bins(band_mag, k_low, k_high, cfg, attempt)
+        n_bins = len(used)
+        if n_bins == 0:
+            continue
+        bits_per_segment = n_bins * cfg.bits_per_bin
+        n_chunks = n_seg // cfg.chunk_segments
+        if n_chunks == 0 or bits_per_segment == 0:
+            continue
 
-    K = cfg.chunk_segments
-    n = cfg.segment_length
-    step = 2.0 * math.pi / cfg.phase_levels
-    bits_per_bin = cfg.bits_per_bin
+        K = cfg.chunk_segments
+        n = cfg.segment_length
+        step = 2.0 * math.pi / cfg.phase_levels
+        bits_per_bin = cfg.bits_per_bin
 
-    bits: List[int] = []
-    reliable: List[bool] = []
-    for c in range(n_chunks):
-        j0 = c * K
-        spec = np.fft.rfft(
-            stego[j0 * n : (j0 + K) * n].reshape(K, n).astype(np.float64), axis=1
-        )
-        mag = np.abs(spec)
-        phase = np.angle(spec)
-        band_med_seg = float(np.median(mag[0, k_low : k_high + 1])) or 1.0
-        carrier_mag = mag[0, used]
-        carrier_phase = phase[0, used]
-        ok = carrier_mag >= reliability_floor_magnitude(cfg, band_med_seg)
-        symbols = np.rint((carrier_phase % (2.0 * math.pi)) / step).astype(np.int64) % cfg.phase_levels
-        for i in range(n_bins):
-            v = int(symbols[i])
-            for shift in range(bits_per_bin - 1, -1, -1):
-                bits.append((v >> shift) & 1)
-                reliable.append(bool(ok[i]))
+        bits: List[int] = []
+        reliable: List[bool] = []
+        for c in range(n_chunks):
+            j0 = c * K
+            spec = np.fft.rfft(
+                stego[j0 * n : (j0 + K) * n].reshape(K, n).astype(np.float64), axis=1
+            )
+            mag = np.abs(spec)
+            phase = np.angle(spec)
+            band_med_seg = float(np.median(mag[0, k_low : k_high + 1])) or 1.0
+            carrier_mag = mag[0, used]
+            carrier_phase = phase[0, used]
+            ok = carrier_mag >= reliability_floor_magnitude(cfg, band_med_seg)
+            symbols = np.rint((carrier_phase % (2.0 * math.pi)) / step).astype(np.int64) % cfg.phase_levels
+            for i in range(n_bins):
+                v = int(symbols[i])
+                for shift in range(bits_per_bin - 1, -1, -1):
+                    bits.append((v >> shift) & 1)
+                    reliable.append(bool(ok[i]))
 
-    # Drop the trailing partial byte so the RS layer sees a whole byte count.
-    n_bytes_bits = (len(bits) // 8) * 8
-    bits = bits[:n_bytes_bits]
-    reliable = reliable[:n_bytes_bits]
-    stream = bits_to_bytes(bits)
-    erasure_mask = reliability_mask_bytes(range(len(bits)), reliable)
+        # Drop the trailing partial byte so the RS layer sees a whole byte count.
+        n_bytes_bits = (len(bits) // 8) * 8
+        bits = bits[:n_bytes_bits]
+        reliable = reliable[:n_bytes_bits]
+        stream = bits_to_bytes(bits)
+        erasure_mask = reliability_mask_bytes(range(len(bits)), reliable)
 
-    try:
-        payload, flags, codewords = parse_embedded(stream, erasure_mask, rs_cfg)
-    except Exception as exc:
-        raise ExtractionError(f"no PhaseVeil payload recovered: {exc}") from exc
-    return payload, flags, codewords
+        try:
+            payload, flags, codewords = parse_embedded(stream, erasure_mask, rs_cfg)
+        except Exception as exc:
+            last_error = exc
+            continue
+        return payload, flags, codewords
+
+    raise ExtractionError(
+        f"no PhaseVeil payload recovered: {last_error or 'no usable bin selection'}"
+    )
 
 
 def hide_file(
@@ -487,13 +560,15 @@ def hide_file(
     out_path: str | Path,
     data: bytes,
     *,
-    cfg: AudioConfig = AudioConfig(),
+    audio_cfg: AudioConfig = AudioConfig(),
     rs_cfg: ReedSolomonConfig = ReedSolomonConfig(),
     flags: int = 0,
 ) -> StegoMetrics:
     """Read ``in_path``, embed ``data``, write ``out_path``; return the metrics."""
     rate, cover = read_wav(in_path)
-    stego, metrics = hide_payload(cover, rate, data, cfg=cfg, rs_cfg=rs_cfg, flags=flags)
+    stego, metrics = hide_payload(
+        cover, rate, data, audio_cfg=audio_cfg, rs_cfg=rs_cfg, flags=flags
+    )
     write_wav(out_path, rate, stego)
     return metrics
 
@@ -502,10 +577,12 @@ def extract_file(
     in_path: str | Path,
     *,
     passphrase: Optional[str] = None,
-    cfg: AudioConfig = AudioConfig(),
+    audio_cfg: AudioConfig = AudioConfig(),
     rs_cfg: ReedSolomonConfig = ReedSolomonConfig(),
 ) -> bytes:
     """Extract and (if needed) decrypt a payload from a stego wav file."""
     rate, stego = read_wav(in_path)
-    payload, flags, _codewords = extract_payload(stego, rate, cfg=cfg, rs_cfg=rs_cfg)
+    payload, flags, _codewords = extract_payload(
+        stego, rate, audio_cfg=audio_cfg, rs_cfg=rs_cfg
+    )
     return parse_blob(payload, passphrase, expect_flags=flags)

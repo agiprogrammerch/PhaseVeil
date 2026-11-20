@@ -128,11 +128,11 @@ def benchmark_audio(cfg: PhaseVeilConfig, failures: List[str]) -> Dict[str, obje
     for label, passphrase in (("plaintext", None), ("AES-256-GCM", "correct horse battery")):
         blob = make_blob(payload_text, passphrase, compress=True, cfg=cfg.crypto)
         stego, metrics = audio_stego.hide_payload(
-            cover, rate, blob.blob, cfg=cfg.audio, rs_cfg=cfg.rs, flags=blob.flags
+            cover, rate, blob.blob, audio_cfg=cfg.audio, rs_cfg=cfg.rs, flags=blob.flags
         )
         try:
             recovered, flags, codewords = audio_stego.extract_payload(
-                stego, rate, cfg=cfg.audio, rs_cfg=cfg.rs
+                stego, rate, audio_cfg=cfg.audio, rs_cfg=cfg.rs
             )
             ok = parse_blob(recovered, passphrase, expect_flags=flags) == payload_text
         except Exception as exc:
@@ -162,8 +162,8 @@ def benchmark_audio(cfg: PhaseVeilConfig, failures: List[str]) -> Dict[str, obje
 
     # Wrong-passphrase rejection
     blob = make_blob(b"secret", "right-pass", compress=True, cfg=cfg.crypto)
-    stego, _m = audio_stego.hide_payload(cover, rate, blob.blob, cfg=cfg.audio, rs_cfg=cfg.rs, flags=blob.flags)
-    recovered, flags, _c = audio_stego.extract_payload(stego, rate, cfg=cfg.audio, rs_cfg=cfg.rs)
+    stego, _m = audio_stego.hide_payload(cover, rate, blob.blob, audio_cfg=cfg.audio, rs_cfg=cfg.rs, flags=blob.flags)
+    recovered, flags, _c = audio_stego.extract_payload(stego, rate, audio_cfg=cfg.audio, rs_cfg=cfg.rs)
     rejected = False
     try:
         parse_blob(recovered, "wrong-pass", expect_flags=flags)
@@ -199,8 +199,6 @@ def benchmark_timing(cfg: PhaseVeilConfig, failures: List[str]) -> Dict[str, obj
     payload = b"Timing-channel jitter test payload over loopback."
     trials = 12
     recovered = 0
-    snrs: List[float] = []
-    thresholds: List[float] = []
     for trial in range(trials):
         blob = make_blob(payload, None, compress=True, cfg=cfg.crypto)
         delays = timing_channel.encode_transmission(blob.blob, blob.flags, cfg.timing, cfg.rs)
@@ -215,10 +213,6 @@ def benchmark_timing(cfg: PhaseVeilConfig, failures: List[str]) -> Dict[str, obj
             ok = False
         if ok:
             recovered += 1
-            snrs.append(1.0)
-            thresholds.append(float(np.mean(iats)))
-        else:
-            snrs.append(0.0)
     # Also verify a worst-case jitter of exactly +-8 ms
     blob = make_blob(payload, None, compress=True, cfg=cfg.crypto)
     delays = timing_channel.encode_transmission(blob.blob, blob.flags, cfg.timing, cfg.rs)
@@ -254,7 +248,7 @@ def benchmark_detector(cfg: PhaseVeilConfig, failures: List[str]) -> Dict[str, o
         blob = make_blob(b"covert payload for detector benchmark" * (i + 1), None,
                          compress=True, cfg=cfg.crypto)
         try:
-            stego, _m = audio_stego.hide_payload(cover, rate, blob.blob, cfg=cfg.audio,
+            stego, _m = audio_stego.hide_payload(cover, rate, blob.blob, audio_cfg=cfg.audio,
                                                  rs_cfg=cfg.rs, flags=blob.flags)
         except Exception as exc:
             failures.append(f"audio detector embed {i}: {exc}")
