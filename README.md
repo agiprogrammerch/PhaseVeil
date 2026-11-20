@@ -443,4 +443,4 @@ tests/               133 tests, synthetic fixtures only, no binary media
 
 ## License
 
-MIT. Educational/research use only - see the disclaimer above.
+MIT — see [LICENSE](LICENSE). Educational/research use only; see the disclaimer above.
