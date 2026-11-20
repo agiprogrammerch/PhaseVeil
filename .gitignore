@@ -1,0 +1,31 @@
+# Bytecode / caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Generated media artefacts -- NEVER commit WAV/audio binaries (spec constraint).
+*.wav
+!tests/fixtures/*.wav.disabled
+
+# Generated traces / benchmark output
+*.trace.json
+trace*.json
+benchmark_output.txt
+
+# OS / editor cruft
+.DS_Store
+*.swp
+.idea/
+.vscode/

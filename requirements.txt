@@ -1,0 +1,10 @@
+# PhaseVeil runtime dependencies -- STRICT allow-list.
+# Allowed ONLY: numpy, scipy, cryptography, reedsolo (+ Python standard library).
+# pytest is required only for the test suite.
+numpy>=1.24
+scipy>=1.10
+cryptography>=41.0
+reedsolo>=1.7
+
+# Dev / test only
+pytest>=7.4

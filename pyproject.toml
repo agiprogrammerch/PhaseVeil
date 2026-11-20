@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phaseveil"
+version = "1.0.0"
+description = "Research-grade covert-channel, audio-spectrum steganography and statistical steganalysis engine (deterministic, zero AI/ML)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "PhaseVeil Research" }]
+keywords = [
+    "steganography",
+    "phase-coding",
+    "covert-channel",
+    "steganalysis",
+    "dsp",
+    "reedsolomon",
+    "aes-gcm",
+]
+classifiers = [
+    "Development Status :: 5 - Research",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Security :: Cryptography",
+]
+
+# STRICT dependency policy: numpy / scipy / cryptography / reedsolo / pytest ONLY.
+# No AI/ML frameworks, no web frameworks, no GUIs, no raw-packet (scapy) deps.
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "cryptography>=41.0",
+    "reedsolo>=1.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+phaseveil = "phaseveil.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+filterwarnings = ["ignore::DeprecationWarning"]
