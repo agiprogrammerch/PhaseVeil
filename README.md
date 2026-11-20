@@ -2,6 +2,10 @@
 
 **Covert-channel · audio-spectrum steganography · statistical steganalysis engine**
 
+> **Developer:** Arush Shakya · [agiprogrammer@gmail.com](mailto:agiprogrammer@gmail.com)
+>
+> *Build, not Bought.*
+
 PhaseVeil is a research-grade, fully deterministic Python engine for
 
 1. hiding **AES-256-GCM encrypted** payloads in the **phase spectrum** of 16-bit
