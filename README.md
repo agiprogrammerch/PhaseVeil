@@ -43,7 +43,7 @@ studied here are exactly those deployed by real defenders.
                     ┌─────────────────────────────────────────────────┐
                     │                 phaseveil                       │
                     │                 (CLI entry)                     │
-                    └───────┬──────────────┬──────────────┬──────────┘
+                    └───────┬──────────────┬──────────────┬───────────┘
                             │              │              │
         ┌───────────────────┼──────────────┼──────────────┼───────────────────┐
         │                   │              │              │                   │
@@ -62,12 +62,12 @@ studied here are exactly those deployed by real defenders.
         │     │ STEGO .wav  │                     │ loopback      │          │
         │     │ 16-bit PCM  │                     │ UDP/TCP IATs  │          │
         │     └──────┬──────┘                     └───────┬───────┘          │
-        │            │                                     │                  │
-        │            └──────────────┬──────────────────────┘                  │
-        │                           │                                         │
-        │                           ▼                                         │
-        │                  ┌─────────────────┐                                │
-        └─────────────────▶│ phase-vector /  │◀───────────────────────────────┘
+        │            │                                    │                  │
+        │            └──────────────┬─────────────────────┘                  │
+        │                           │                                        │
+        │                           ▼                                        │
+        │                  ┌─────────────────┐                               │
+        └─────────────────▶│ phase-vector /  │◀──────────────────────────────┘
                            │ packet trace    │        (both channels feed the
                            └─────────────────┘         SAME statistical engine)
 ```
@@ -77,18 +77,18 @@ studied here are exactly those deployed by real defenders.
 ```
  cover.wav ─► read 16-bit PCM ─► split into N=2048-sample segments
                                         │
-              ┌─────────────────────────┼──────────────────────────┐
-              │  select mid-band bins    │                          │
-              │  (|X| in [0.3,1.0]x band median, dead-band 3%)      │
-              │            ▼                                        │
-              │   chunk of K=4 segments:                           │
+              ┌─────────────────────────┼────────────────────────────┐
+              │  select mid-band bins   │                            │
+              │  (|X| in [0.3,1.0]x band median, dead-band 3%)       │
+              │            ▼                                         │
+              │   chunk of K=4 segments:                             │
               │   ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐        │
               │   │ seg j0 │►│ seg j1 │►│ seg j2 │►│ seg j3 │        │
               │   │ carrier│ │ delta  │ │ delta  │ │ delta  │        │
               │   │ 8-PSK  │ │ copy   │ │ copy   │ │ copy   │        │
               │   └────────┘ └────────┘ └────────┘ └────────┘        │
               │   phases at 92 used bins → 2πv/8 (v = 3 payload bits)│
-              └─────────────────────────┬──────────────────────────┘
+              └─────────────────────────┬────────────────────────────┘
                                         ▼
                           irfft → round to int16 → stego.wav
                                         │
@@ -109,8 +109,8 @@ studied here are exactly those deployed by real defenders.
   ┌─────────────────────────────┐        ┌─────────────────────────────┐
   │ sender (perf_counter, spin) │  UDP   │ receiver (chronological     │
   │ pkt0 ─gap1─ pkt1 ─gap2─ pkt2│───────▶│ clock), records timestamps, │
-  └─────────────────────────────┘  127.0.0.1  decodes adaptively      │
-                                      └─────────────────────────────┘
+  └─────────────────────────────┘        │127.0.0.1  decodes adaptively│
+                                         └─────────────────────────────┘
 ```
 
 ### Detector pipeline (identical for both channels)
@@ -232,22 +232,22 @@ verdict = SUSPICIOUS iff score ≥ 0.5
 
 ## Chosen parameters
 
-| Layer | Parameter | Value | Rationale |
-|---|---|---|---|
-| Audio | FFT segment `N` | 2048 | 46 ms hop, 21.5 Hz bins @44.1 kHz; `sigma/|X|` phase noise ~1e-3 rad |
-| Audio | embedding band | 1000–6000 Hz | mid-band: strong harmonics, no LF rumble / HF hiss |
-| Audio | constellation `M` | 8 (3 bits/bin) | 3x payload per unit injected energy vs 2-PSK |
-| Audio | chunk `K` | 4 segments | data carrier + 3 delta-preserving followers |
-| Audio | bin window | `[0.3, 1.0] ×` band median, 3 % dead-band | energy-aware selection, stable bin sets |
-| Audio | boundary ladder | 7 multipliers, 0.2 % stability margin | a bin sitting within 0.03 % of a selection boundary (int16 rounding scale) would otherwise shift the whole bit layout; the embedder picks a *stable* boundary and the extractor tries the same ladder |
-| Audio | reliability floor | `max(1 %, 20 × σ_q)` | erasures only where the phase is truly lost |
-| FEC | Reed–Solomon | RS(255, 191), nsym 64 | 32 byte errors or 64 erasures per codeword |
-| FEC | small-payload mode | 1 codeword of `frame + parity` | ~2x shorter streams for short payloads |
-| Crypto | AES-256-GCM | 200 000 PBKDF2 iterations, 16 B salt, 12 B nonce | authenticated, nonce-reuse-free |
-| Timing | `bit0_ms` / `bit1_ms` | 20 / 60 ms | 40 ms gap vs ±8 ms jitter = 5× margin |
-| Timing | preamble | 16 alternating bits | sync without assuming absolute clocks |
-| Timing | idle timeout | 1500 ms | clean listener shutdown |
-| Detector | verdict threshold | 0.50 | calibrated on synthetic TP/FP sweep |
+| Layer    | Parameter             | Value                                            | Rationale                                                            |
+|----------|-----------------------|--------------------------------------------------|----------------------------------------------------------------------|
+| Audio    | FFT segment `N`       | 2048                                             | 46 ms hop, 21.5 Hz bins @44.1 kHz; `sigma/|X|` phase noise ~1e-3 rad |
+| Audio    | embedding band        | 1000–6000 Hz                                     | mid-band: strong harmonics, no LF rumble / HF hiss                   |
+| Audio    | constellation `M`     | 8 (3 bits/bin)                                   | 3x payload per unit injected energy vs 2-PSK                         |
+| Audio    | chunk `K`             | 4 segments                                       | data carrier + 3 delta-preserving followers                          |
+| Audio    | bin window            | `[0.3, 1.0] ×` band median, 3 % dead-band        | energy-aware selection, stable bin sets                              |
+| Audio    | boundary ladder       | 7 multipliers, 0.2 % stability margin            | a bin sitting within 0.03 % of a selection boundary (int16 rounding scale) would otherwise shift the whole bit layout; the embedder picks a *stable* boundary and the extractor tries the same ladder                                   |
+| Audio    | reliability floor     | `max(1 %, 20 × σ_q)`                             | erasures only where the phase is truly lost                          |
+| FEC      | Reed–Solomon          | RS(255, 191), nsym 64                            | 32 byte errors or 64 erasures per codeword                           |
+| FEC      | small-payload mode    | 1 codeword of `frame + parity`                   | ~2x shorter streams for short payloads                               |
+| Crypto   | AES-256-GCM           | 200 000 PBKDF2 iterations, 16 B salt, 12 B nonce | authenticated, nonce-reuse-free                                      |
+| Timing   | `bit0_ms` / `bit1_ms` | 20 / 60 ms                                       | 40 ms gap vs ±8 ms jitter = 5× margin                                |
+| Timing   | preamble              | 16 alternating bits                              | sync without assuming absolute clocks                                |
+| Timing   | idle timeout          | 1500 ms                                          | clean listener shutdown                                              |
+| Detector | verdict threshold     | 0.50                                             | calibrated on synthetic TP/FP sweep                                  |
 
 ---
 
@@ -279,15 +279,15 @@ erasure-induced failures, and every covert sample detected.
 
 ## Hardware & efficiency footprint
 
-| Metric | Value |
-|---|---|
-| Peak RAM (full benchmark, all three subsystems) | **111.6 MB** (budget 150 MB) |
-| RAM, audio-only workflow (CLI `audio hide`) | ~65 MB (`scipy.stats` loaded lazily) |
-| CPU | dual-core x86-64 Linux; single-threaded (no BLAS threads needed) |
-| Benchmark wall-clock | 2.3 s (3 s covers) |
-| Test-suite wall-clock | ~70 s |
-| Repository media | **0 bytes of binary audio** - all WAVs are synthesised in memory |
-| Dependencies | `numpy`, `scipy`, `cryptography`, `reedsolo` (+ `pytest` for tests) |
+| Metric                                          | Value                                                               |
+|-------------------------------------------------|---------------------------------------------------------------------|
+| Peak RAM (full benchmark, all three subsystems) | **111.6 MB** (budget 150 MB)                                        |
+| RAM, audio-only workflow (CLI `audio hide`)     | ~65 MB (`scipy.stats` loaded lazily)                                |
+| CPU                                             | dual-core x86-64 Linux; single-threaded (no BLAS threads needed)    |
+| Benchmark wall-clock                            | 2.3 s (3 s covers)                                                  |
+| Test-suite wall-clock                           | ~70 s                                                               |
+| Repository media                                | **0 bytes of binary audio** - all WAVs are synthesised in memory    |
+| Dependencies                                    | `numpy`, `scipy`, `cryptography`, `reedsolo` (+ `pytest` for tests) |
 
 Memory engineering notes:
 
@@ -302,19 +302,50 @@ Memory engineering notes:
 
 ## Installation
 
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -e .          # runtime dependencies only
-.venv/bin/pip install -e '.[dev]'   # + pytest
-```
-
-Or plain:
+**One command, no virtualenv** (recommended - this is the verified path):
 
 ```bash
-pip install numpy scipy cryptography reedsolo pytest
+pip install --user --break-system-packages -e .
+phaseveil --version
 ```
 
-Python 3.10 or newer.
+`--user` installs into `~/.local/lib/.../site-packages` (never touches the
+system directories), `--break-system-packages` bypasses Debian/Kali's PEP 668
+"externally managed environment" refusal, and `-e .` keeps the package pointing
+at this source tree - so edits to `src/` take effect immediately without
+reinstalling. If `~/.local/bin` is not on your `PATH`, add
+`export PATH="$HOME/.local/bin:$PATH"` to your shell profile, or invoke the
+entry point directly:
+
+```bash
+python3 -m phaseveil.cli --version
+```
+
+`numpy`, `scipy` and `cryptography` are usually already present on a modern
+Linux image; only `reedsolo` (~30 kB, pure Python) and `pytest` (dev only) are
+installed by the command above.
+
+**If you cannot install anything at all**, the package also runs straight from
+the source tree - a `conftest.py` at the repo root puts `src/` on `sys.path`:
+
+```bash
+# CLI
+PYTHONPATH=src python3 -m phaseveil.cli audio hide --in cover.wav --out stego.wav --text "hi"
+
+# test suite - no install step whatsoever
+python3 -m pytest
+```
+
+**If you *do* want full dependency isolation**, `pipx` gives you the same
+`phaseveil` command with its own environment (created and managed outside the
+project, but never in your way):
+
+```bash
+pipx install -e .
+```
+
+Verified on this machine with both the system Python 3.14 and an Anaconda
+Python 3.13 - 136 tests pass, `phaseveil benchmark` reports peak RSS 106-111 MB.
 
 ---
 

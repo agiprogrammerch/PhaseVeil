@@ -6,6 +6,8 @@ import json
 import threading
 import time
 
+from typing import List
+
 import numpy as np
 import pytest
 
@@ -156,27 +158,64 @@ def _free_udp_port() -> int:
     return int(port)
 
 
+def _wait_for_listener(holder: dict, timeout: float = 60.0) -> None:
+    """Block until the listener thread finished (it exits on its idle timeout)."""
+    deadline = time.time() + timeout
+    while "code" not in holder and time.time() < deadline:
+        time.sleep(0.02)
+    assert "code" in holder, "listener thread did not finish"
+
+
+def _cli_listen(port: int, extra: List[str], holder: dict) -> threading.Event:
+    """Start the listener subcommand in a thread; returns its readiness event.
+
+    The listener sets the event as soon as its socket is bound, so the sender
+    can start immediately afterwards without losing the leading packets.
+    """
+    import threading
+
+    from phaseveil import timing_channel
+
+    listening = threading.Event()
+
+    def _listen() -> None:
+        orig = timing_channel.receive_udp
+
+        def _patched(*a, **kw):
+            kw["ready"] = listening
+            return orig(*a, **kw)
+
+        timing_channel.receive_udp = _patched
+        try:
+            holder["code"] = main(["timing", "listen", "--host", "127.0.0.1",
+                                   "--port", str(port), *extra])
+        finally:
+            timing_channel.receive_udp = orig
+
+    listener = threading.Thread(target=_listen, daemon=True)
+    listener.start()
+    return listening
+
+
 def test_cli_timing_send_and_listen(tmp_path, capsys) -> None:
     """Live loopback exchange through both CLI subcommands."""
+    import threading
+
     port = _free_udp_port()
     trace = tmp_path / "trace.json"
     out = tmp_path / "received.bin"
     text = "cli live loopback payload"
     holder: dict = {}
 
-    def _listen() -> None:
-        holder["code"] = main(
-            ["timing", "listen", "--host", "127.0.0.1", "--port", str(port),
-             "--delay-ms", "4,12", "--save-trace", str(trace), "--out", str(out)]
-        )
+    listening = _cli_listen(
+        port, ["--delay-ms", "4,12", "--save-trace", str(trace), "--out", str(out)], holder
+    )
+    assert listening.wait(timeout=10.0), "listener never bound"
 
-    listener = threading.Thread(target=_listen, daemon=True)
-    listener.start()
-    time.sleep(0.1)
     code = main(["timing", "send", "--host", "127.0.0.1", "--port", str(port),
                  "--delay-ms", "4,12", "--text", text])
     assert code == 0
-    listener.join(timeout=60.0)
+    _wait_for_listener(holder)
     assert holder["code"] == 0
     assert trace.exists()
     assert out.read_bytes() == text.encode("utf-8")
@@ -187,18 +226,12 @@ def test_cli_timing_listen_encrypted(tmp_path, capsys) -> None:
     text = "encrypted cli timing payload"
     holder: dict = {}
 
-    def _listen() -> None:
-        holder["code"] = main(
-            ["timing", "listen", "--host", "127.0.0.1", "--port", str(port),
-             "--delay-ms", "4,12", "--passphrase", PASS]
-        )
+    listening = _cli_listen(port, ["--delay-ms", "4,12", "--passphrase", PASS], holder)
+    assert listening.wait(timeout=10.0), "listener never bound"
 
-    listener = threading.Thread(target=_listen, daemon=True)
-    listener.start()
-    time.sleep(0.1)
     main(["timing", "send", "--host", "127.0.0.1", "--port", str(port),
           "--delay-ms", "4,12", "--text", text, "--passphrase", PASS])
-    listener.join(timeout=60.0)
+    _wait_for_listener(holder)
     assert holder["code"] == 0
     assert text in capsys.readouterr().out
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import socket
+import threading
 
 import numpy as np
 import pytest
@@ -363,7 +365,6 @@ def test_live_captured_trace_is_detectable(cfg, tmp_path) -> None:
     """A real loopback capture must be flagged (integration through the socket)."""
     import socket
     import threading
-    import time
 
     fast = cfg.with_(
         timing=TimingConfig(
@@ -378,33 +379,33 @@ def test_live_captured_trace_is_detectable(cfg, tmp_path) -> None:
     port = s.getsockname()[1]
     s.close()
     holder: dict = {}
+    listening = threading.Event()
 
     def _listen() -> None:
-        arrival, _c = timing_channel_receive(port, fast.timing)
+        arrival, _c = timing_channel_receive(port, fast.timing, listening)
         holder["arrival"] = arrival
 
     listener = threading.Thread(target=_listen, daemon=True)
     listener.start()
-    time.sleep(0.05)
+    assert listening.wait(timeout=10.0), "listener never bound"
     from phaseveil.timing_channel import transmit_udp
 
     transmit_udp("127.0.0.1", port, delays, fast.timing)
-    listener.join(timeout=30.0)
+    listener.join(timeout=60.0)
     report = analyze_timing_trace(arrival_to_iats(holder["arrival"]), cfg.detector)
     assert report.verdict == VERDICT_SUSPICIOUS
 
 
-def timing_channel_receive(port: int, tcfg: TimingConfig):
+def timing_channel_receive(port: int, tcfg: TimingConfig, ready: threading.Event):
     from phaseveil.timing_channel import receive_udp
 
-    return receive_udp("127.0.0.1", port, tcfg)
+    return receive_udp("127.0.0.1", port, tcfg, ready=ready)
 
 
 def test_decoded_live_payload_matches(cfg, tmp_path) -> None:
     """End-to-end: live socket -> decode -> payload equality (full stack)."""
     import socket
     import threading
-    import time
 
     fast = cfg.with_(
         timing=TimingConfig(
@@ -420,18 +421,19 @@ def test_decoded_live_payload_matches(cfg, tmp_path) -> None:
     port = s.getsockname()[1]
     s.close()
     holder: dict = {}
+    listening = threading.Event()
 
     def _listen() -> None:
-        arrival, _c = timing_channel_receive(port, fast.timing)
+        arrival, _c = timing_channel_receive(port, fast.timing, listening)
         holder["arrival"] = arrival
 
     listener = threading.Thread(target=_listen, daemon=True)
     listener.start()
-    time.sleep(0.05)
+    assert listening.wait(timeout=10.0), "listener never bound"
     from phaseveil.timing_channel import transmit_udp
 
     transmit_udp("127.0.0.1", port, delays, fast.timing)
-    listener.join(timeout=30.0)
+    listener.join(timeout=60.0)
     result = decode_transmission(
         arrival_to_iats(holder["arrival"]), fast.timing, fast.rs
     )

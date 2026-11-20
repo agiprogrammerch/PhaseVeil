@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import socket
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -421,18 +422,23 @@ def receive_udp(
     idle_timeout_ms: Optional[float] = None,
     max_seconds: Optional[float] = None,
     recorder: Optional[List[float]] = None,
+    ready: Optional[threading.Event] = None,
 ) -> Tuple[np.ndarray, List[float]]:
     """Receive UDP heartbeats on ``127.0.0.1``; returns ``(arrival_ms, clock)``.
 
     ``arrival_ms`` are arrival timestamps relative to the first packet (the
     covert channel's own time base); ``clock`` is the raw
-    ``perf_counter`` list for trace export.
+    ``perf_counter`` list for trace export.  If ``ready`` is given it is set as
+    soon as the socket is bound, so a caller can start a sender without losing
+    the leading packets (a plain ``sleep`` is a race on a loaded machine).
     """
     idle = (idle_timeout_ms if idle_timeout_ms is not None else cfg.listen_idle_timeout_ms) / 1000.0
     max_s = max_seconds if max_seconds is not None else cfg.listen_max_seconds
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((host, int(port)))
+        if ready is not None:
+            ready.set()
         sock.settimeout(idle)
         clock: List[float] = []
         start = time.perf_counter()
@@ -460,14 +466,21 @@ def receive_tcp(
     idle_timeout_ms: Optional[float] = None,
     max_seconds: Optional[float] = None,
     recorder: Optional[List[float]] = None,
+    ready: Optional[threading.Event] = None,
 ) -> Tuple[np.ndarray, List[float]]:
-    """Receive TCP heartbeats on ``127.0.0.1``; returns ``(arrival_ms, clock)``."""
+    """Receive TCP heartbeats on ``127.0.0.1``; returns ``(arrival_ms, clock)``.
+
+    ``ready`` is set once the listening socket exists; the kernel backlog keeps
+    an early connection from being lost while ``accept`` still runs.
+    """
     idle = (idle_timeout_ms if idle_timeout_ms is not None else cfg.listen_idle_timeout_ms) / 1000.0
     max_s = max_seconds if max_seconds is not None else cfg.listen_max_seconds
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         srv.bind((host, int(port)))
         srv.listen(1)
+        if ready is not None:
+            ready.set()
         srv.settimeout(max_s)
         deadline = time.perf_counter() + max_s
         conn, _addr = srv.accept()

@@ -185,36 +185,42 @@ def _fast_timing(cfg: PhaseVeilConfig) -> PhaseVeilConfig:
 
 
 def _live_round_trip(cfg, payload, passphrase, protocol: str, tmp_path) -> None:
-    """Run a live loopback transmission: listener in a thread, sender inline."""
+    """Run a live loopback transmission: listener in a thread, sender inline.
+
+    The listener signals readiness through a ``threading.Event`` so the sender
+    never starts before the socket is bound (a plain sleep is a race on a
+    loaded machine, and losing the leading packets destroys the preamble).
+    """
     import threading
 
     fast = _fast_timing(cfg)
     blob = make_blob(payload, passphrase, compress=True, cfg=fast.crypto)
     delays = encode_transmission(blob.blob, blob.flags, fast.timing, fast.rs)
 
-    if protocol == "tcp":
-        port = free_tcp_port()
-    else:
-        port = free_udp_port()
-
+    port = free_tcp_port() if protocol == "tcp" else free_udp_port()
     holder: dict = {}
+    listening = threading.Event()
 
     def _listen() -> None:
         if protocol == "tcp":
-            arrival, clock = receive_tcp("127.0.0.1", port, fast.timing)
+            arrival, clock = receive_tcp(
+                "127.0.0.1", port, fast.timing, ready=listening
+            )
         else:
-            arrival, clock = receive_udp("127.0.0.1", port, fast.timing)
+            arrival, clock = receive_udp(
+                "127.0.0.1", port, fast.timing, ready=listening
+            )
         holder["arrival"] = arrival
 
     listener = threading.Thread(target=_listen, daemon=True)
     listener.start()
-    time.sleep(0.05)  # let the listener bind/serve before the first packet
+    assert listening.wait(timeout=10.0), "listener never bound"
 
     if protocol == "tcp":
         summary = transmit_tcp("127.0.0.1", port, delays, fast.timing)
     else:
         summary = transmit_udp("127.0.0.1", port, delays, fast.timing)
-    listener.join(timeout=30.0)
+    listener.join(timeout=60.0)
 
     assert summary.packets == len(delays) + 1  # one leading packet, then len(delays) gaps
     arrival = holder.get("arrival")
@@ -254,16 +260,19 @@ def test_live_udp_trace_save_load(cfg, tmp_path) -> None:
     import threading
 
     holder: dict = {}
+    listening = threading.Event()
 
     def _listen() -> None:
-        arrival, _clock = receive_udp("127.0.0.1", port, fast.timing)
+        arrival, _clock = receive_udp(
+            "127.0.0.1", port, fast.timing, ready=listening
+        )
         holder["arrival"] = arrival
 
     listener = threading.Thread(target=_listen, daemon=True)
     listener.start()
-    time.sleep(0.05)
+    assert listening.wait(timeout=10.0), "listener never bound"
     transmit_udp("127.0.0.1", port, delays, fast.timing)
-    listener.join(timeout=30.0)
+    listener.join(timeout=60.0)
 
     trace = tmp_path / "capture.json"
     save_trace(str(trace), holder["arrival"], protocol="udp", host="127.0.0.1", port=port)
